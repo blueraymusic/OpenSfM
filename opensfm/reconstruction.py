@@ -100,6 +100,8 @@ def bundle_shot_poses(
         dict(rig_camera_priors),
         config,
     )
+    log_bundle_stats("SHOT", report)
+    logger.debug(report["brief_report"])
     return report
 
 
@@ -1483,6 +1485,7 @@ def grow_reconstruction(
             triangulate_shot_features(tracks_manager, reconstruction, new_shots, config)
             np_after = len(reconstruction.points)
             step["triangulated_points"] = np_after - np_before
+            logger.info(f"Triangulated {np_after - np_before} points")
 
             if should_retriangulate.should():
                 logger.info("Re-triangulating")
