@@ -627,6 +627,7 @@ def absolute_pose_known_rotation_ransac(
 ) -> np.ndarray:
     params = pyrobust.RobustEstimatorParams()
     params.iterations = iterations
+    params.probability = probability
     result = pyrobust.ransac_absolute_pose_known_rotation(
         bs, Xs, threshold, params, pyrobust.RansacType.RANSAC
     )
@@ -645,6 +646,7 @@ def absolute_pose_ransac(
 ) -> np.ndarray:
     params = pyrobust.RobustEstimatorParams()
     params.iterations = iterations
+    params.probability = probability
     result = pyrobust.ransac_absolute_pose(
         bs, Xs, threshold, params, pyrobust.RansacType.RANSAC
     )
@@ -665,6 +667,7 @@ def relative_pose_ransac(
 ) -> np.ndarray:
     params = pyrobust.RobustEstimatorParams()
     params.iterations = iterations
+    params.probability = probability
     result = pyrobust.ransac_relative_pose(
         b1, b2, threshold, params, pyrobust.RansacType.RANSAC
     )
@@ -685,6 +688,7 @@ def relative_pose_ransac_rotation_only(
 ) -> np.ndarray:
     params = pyrobust.RobustEstimatorParams()
     params.iterations = iterations
+    params.probability = probability
     result = pyrobust.ransac_relative_rotation(
         b1, b2, threshold, params, pyrobust.RansacType.RANSAC
     )
