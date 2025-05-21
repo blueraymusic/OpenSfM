@@ -33,6 +33,7 @@ BundleAdjuster::BundleAdjuster() {
   p2_sd_ = 1;
   k3_sd_ = 1;
   k4_sd_ = 1;
+  use_analytic_ = true;
   compute_covariances_ = false;
   covariance_estimation_valid_ = false;
   compute_reprojection_errors_ = true;
