@@ -492,7 +492,7 @@ py::dict BAHelpers::BundleShotPoses(
       shot_cameras[shot_id] = shot.GetCamera()->id;
       shot_rig_cameras[shot_id] = shot_n_rig_camera.second->id;
 
-      const auto is_fixed = shot_ids.find(shot_id) != shot_ids.end();
+      const auto is_fixed = shot_ids.find(shot_id) == shot_ids.end();
       if (!is_fixed) {
         if (config["bundle_use_gps"].cast<bool>()) {
           const auto pos = shot.GetShotMeasurements().gps_position_;
@@ -522,18 +522,20 @@ py::dict BAHelpers::BundleShotPoses(
   }
 
   // add observations
+  int observations = 0;
   for (const auto& shot_id : shot_ids) {
     const auto& shot = map.GetShot(shot_id);
     for (const auto& lm_obs : shot.GetLandmarkObservations()) {
       const auto& obs = lm_obs.second;
       ba.AddPointProjectionObservation(shot.id_, lm_obs.first->id_, obs.point,
                                        obs.scale, obs.depth_prior);
+      ++observations;
     }
   }
 
   ba.SetPointProjectionLossFunction(
-      config["loss_function"].cast<std::string>(),
-      config["loss_function_threshold"].cast<double>());
+    config["loss_function"].cast<std::string>(),
+    config["loss_function_threshold"].cast<double>());
   ba.SetInternalParametersPriorSD(
       config["exif_focal_sd"].cast<double>(),
       config["principal_point_sd"].cast<double>(),
@@ -565,6 +567,9 @@ py::dict BAHelpers::BundleShotPoses(
   }
 
   const auto timer_teardown = std::chrono::high_resolution_clock::now();
+  report["num_images"] = 1;
+  report["num_points"] = landmarks.size();
+  report["num_reprojections"] = observations;
   report["brief_report"] = ba.BriefReport();
   report["wall_times"] = py::dict();
   report["wall_times"]["setup"] =
