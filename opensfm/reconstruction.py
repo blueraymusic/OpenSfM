@@ -7,9 +7,10 @@ import logging
 import math
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from functools import wraps
 from itertools import combinations
 from timeit import default_timer as timer
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import cv2
 import numpy as np
@@ -32,6 +33,37 @@ from opensfm.dataset_base import DataSetBase
 
 
 logger: logging.Logger = logging.getLogger(__name__)
+
+
+class Profiler:
+    singleton = None
+    times = defaultdict(float)
+
+    def __new__(cls):
+        if cls.singleton is None:
+            cls.singleton = super(Profiler, cls).__new__(cls)
+            cls.singleton.times = defaultdict(float)
+        return cls.singleton
+
+    def __init__(self):
+        pass
+
+    def __call__(self, func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            start_time = timer()
+            result = func(*args, **kwargs)
+            end_time = timer()
+            self.times[func.__name__] += end_time - start_time
+            return result
+
+        return wrapper
+
+    def get_times(self):
+        return dict(self.times)
+
+    def reset(self):
+        self.times.clear()
 
 
 class ReconstructionAlgorithm(str, enum.Enum):
@@ -65,6 +97,7 @@ def log_bundle_stats(bundle_type: str, bundle_report: Dict[str, Any]) -> None:
     logger.info(msg)
 
 
+@Profiler()
 def bundle(
     reconstruction: types.Reconstruction,
     camera_priors: Dict[str, pygeometry.Camera],
@@ -85,6 +118,7 @@ def bundle(
     return report
 
 
+@Profiler()
 def bundle_shot_poses(
     reconstruction: types.Reconstruction,
     shot_ids: Set[str],
@@ -105,6 +139,7 @@ def bundle_shot_poses(
     return report
 
 
+@Profiler()
 def bundle_local(
     reconstruction: types.Reconstruction,
     camera_priors: Dict[str, pygeometry.Camera],
@@ -680,6 +715,7 @@ def reconstructed_points_for_images(
     return sorted(res.items(), key=lambda x: -x[1])
 
 
+@Profiler()
 def resect(
     data: DataSetBase,
     tracks_manager: pymap.TracksManager,
@@ -761,6 +797,7 @@ def corresponding_tracks(
     return corresponding_tracks
 
 
+@Profiler()
 def compute_common_tracks(
     reconstruction1: types.Reconstruction,
     reconstruction2: types.Reconstruction,
@@ -1103,6 +1140,7 @@ class TrackTriangulator:
             return r
 
 
+@Profiler()
 def triangulate_shot_features(
     tracks_manager: pymap.TracksManager,
     reconstruction: types.Reconstruction,
@@ -1146,6 +1184,7 @@ def triangulate_shot_features(
                 )
 
 
+@Profiler()
 def retriangulate(
     tracks_manager: pymap.TracksManager,
     reconstruction: types.Reconstruction,
@@ -1188,9 +1227,9 @@ def retriangulate(
     return report
 
 
-def get_error_distribution(points: Dict[str, pymap.Landmark]) -> Tuple[float, float]:
+def get_error_distribution(points: Iterable[pymap.Landmark]) -> Tuple[float, float]:
     all_errors = []
-    for track in points.values():
+    for track in points:
         all_errors += track.reprojection_errors.values()
     robust_mean = np.median(all_errors, axis=0)
     robust_std = 1.486 * np.median(
@@ -1199,8 +1238,9 @@ def get_error_distribution(points: Dict[str, pymap.Landmark]) -> Tuple[float, fl
     return robust_mean, robust_std
 
 
+@Profiler()
 def get_actual_threshold(
-    config: Dict[str, Any], points: Dict[str, pymap.Landmark]
+    config: Dict[str, Any], points: Iterable[pymap.Landmark]
 ) -> float:
     filter_type = config["bundle_outlier_filtering_type"]
     if filter_type == "FIXED":
@@ -1212,18 +1252,19 @@ def get_actual_threshold(
         return 1.0
 
 
+@Profiler()
 def remove_outliers(
     reconstruction: types.Reconstruction,
-    config: Dict[str, Any],
+    threshold: float,
     points: Optional[Dict[str, pymap.Landmark]] = None,
-) -> int:
+) -> Tuple[float, int]:
     """Remove points with large reprojection error.
 
     A list of point ids to be processed can be given in ``points``.
     """
     if points is None:
         points = reconstruction.points
-    threshold_sqr = get_actual_threshold(config, reconstruction.points) ** 2
+    threshold_sqr = threshold**2
     outliers = []
     for point_id in points:
         for shot_id, error in reconstruction.points[
@@ -1245,7 +1286,7 @@ def remove_outliers(
                 reconstruction.map.remove_landmark(lm)
 
     logger.info("Removed outliers: {}".format(len(outliers)))
-    return len(outliers)
+    return threshold, len(outliers)
 
 
 def shot_lla_and_compass(
@@ -1410,6 +1451,34 @@ class ShouldRetriangulate:
         self.num_points_last = len(self.reconstruction.points)
 
 
+class OutlierThresholdUpdater:
+    """Helper that return a proper threshold for filtering outliers."""
+
+    reconstruction: types.Reconstruction
+    config: Dict[str, Any]
+
+    last_outlier_threshold: Optional[float]
+    is_stabilized: bool
+    tolerance = 1e-3
+
+    def __init__(self, reconstruction: types.Reconstruction, config: Dict[str, Any], tolerance=1e-3) -> None:
+        self.reconstruction = reconstruction
+        self.config = config
+
+        self.last_outlier_threshold = 0.0
+        self.is_stabilized = False
+        self.tolerance = tolerance
+
+    def outlier_threshold(self, points: Optional[Dict[str, pymap.Landmark]] = None) -> Optional[float]:
+        if not self.is_stabilized:
+            current_threshold = get_actual_threshold(self.config, points.values() if points else self.reconstruction.points.values())
+            if self.last_outlier_threshold:
+                self.is_stabilized = abs(self.last_outlier_threshold - current_threshold)/self.last_outlier_threshold < 1e-3
+                logger.info(f"Stabilizing outlier threshold at {self.last_outlier_threshold}")
+            self.last_outlier_threshold = current_threshold
+        return self.last_outlier_threshold
+
+
 def grow_reconstruction(
     data: DataSetBase,
     tracks_manager: pymap.TracksManager,
@@ -1424,15 +1493,18 @@ def grow_reconstruction(
     camera_priors = data.load_camera_models()
     rig_camera_priors = data.load_rig_cameras()
 
+    should_bundle = ShouldBundle(data, reconstruction)
+    should_retriangulate = ShouldRetriangulate(data, reconstruction)
+    threshold_updater_global = OutlierThresholdUpdater(reconstruction, data.config)
+    threshold_updater_local = OutlierThresholdUpdater(reconstruction, data.config)
+
     paint_reconstruction(data, tracks_manager, reconstruction)
     align_reconstruction(reconstruction, gcp, config)
 
     bundle(reconstruction, camera_priors, rig_camera_priors, None, config)
-    remove_outliers(reconstruction, config)
+    remove_outliers(reconstruction, threshold_updater_global.outlier_threshold())
     paint_reconstruction(data, tracks_manager, reconstruction)
 
-    should_bundle = ShouldBundle(data, reconstruction)
-    should_retriangulate = ShouldRetriangulate(data, reconstruction)
     while True:
         if config["save_partial_reconstructions"]:
             paint_reconstruction(data, tracks_manager, reconstruction)
@@ -1497,7 +1569,7 @@ def grow_reconstruction(
                 b2rep = bundle(
                     reconstruction, camera_priors, rig_camera_priors, None, config
                 )
-                remove_outliers(reconstruction, config)
+                remove_outliers(reconstruction, threshold_updater_global.outlier_threshold())
                 step["bundle"] = b1rep
                 step["retriangulation"] = rrep
                 step["bundle_after_retriangulation"] = b2rep
@@ -1508,7 +1580,7 @@ def grow_reconstruction(
                 brep = bundle(
                     reconstruction, camera_priors, rig_camera_priors, None, config
                 )
-                remove_outliers(reconstruction, config)
+                remove_outliers(reconstruction, threshold_updater_global.outlier_threshold())
                 step["bundle"] = brep
                 should_bundle.done()
             elif config["local_bundle_radius"] > 0:
@@ -1520,7 +1592,8 @@ def grow_reconstruction(
                     image,
                     config,
                 )
-                remove_outliers(reconstruction, config, bundled_points)
+                print(bundled_points)
+                remove_outliers(reconstruction, threshold_updater_local.outlier_threshold(points=bundled_points), bundled_points)
                 step["local_bundle"] = brep
 
             logger.info(f"Reconstruction now has {len(reconstruction.shots)} shots.")
@@ -1539,7 +1612,7 @@ def grow_reconstruction(
         config = overidden_config
 
     bundle(reconstruction, camera_priors, rig_camera_priors, gcp, config)
-    remove_outliers(reconstruction, config)
+    remove_outliers(reconstruction, threshold_updater_global.outlier_threshold())
     paint_reconstruction(data, tracks_manager, reconstruction)
     return reconstruction, report
 
@@ -1558,8 +1631,9 @@ def triangulation_reconstruction(
     camera_priors = data.load_camera_models()
     rig_camera_priors = data.load_rig_cameras()
     gcp = data.load_ground_control_points()
-
+    
     reconstruction = helpers.reconstruction_from_metadata(data, images)
+    threshold_updater = OutlierThresholdUpdater(reconstruction, data.config)
 
     config = data.config
     config_override = config.copy()
@@ -1589,7 +1663,7 @@ def triangulation_reconstruction(
             b1rep = bundle(
                 reconstruction, camera_priors, rig_camera_priors, None, config_override
             )
-            remove_outliers(reconstruction, config_override)
+            remove_outliers(reconstruction, threshold_updater.outlier_threshold())
             step["bundle"] = b1rep
             step["retriangulation"] = rrep
             report["steps"].append(step)
@@ -1606,7 +1680,7 @@ def triangulation_reconstruction(
         config = overidden_bias_config
 
     bundle(reconstruction, camera_priors, rig_camera_priors, gcp, config)
-    remove_outliers(reconstruction, config_override)
+    remove_outliers(reconstruction, threshold_updater.outlier_threshold())
     paint_reconstruction(data, tracks_manager, reconstruction)
     return report, [reconstruction]
 
@@ -1663,6 +1737,17 @@ def incremental_reconstruction(
     chrono.lap("compute_reconstructions")
     report["wall_times"] = dict(chrono.lap_times())
     report["not_reconstructed_images"] = list(remaining_images)
+
+    separator = "|" + "-" * 46 + "|"
+    logger.info(separator)
+    logger.info(f"|{'Function Name':<30} {'Time Spent (s)':>15}|")
+    logger.info(separator)
+    for func_name, time_spent in sorted(
+        Profiler().get_times().items(), key=lambda x: -x[1]
+    ):
+        logger.info(f"|{func_name:<30} {time_spent:>15.4f}|")
+    logger.info(separator)
+
     return report, reconstructions
 
 
